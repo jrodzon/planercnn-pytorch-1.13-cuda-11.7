@@ -1,0 +1,17 @@
+name: planercnn_pytorch_1_13_cuda_11_7
+channels:
+  - pytorch
+  - conda-forge
+  - nvidia
+  - defaults
+dependencies:
+  - cffi=1.15.1
+  - matplotlib=3.8.4              # required by RoIAlign test.sh https://github.com/longcw/RoIAlign.pytorch
+  - mkl=2024.0                    # due to a pytorch bug https://github.com/pytorch/pytorch/issues/123097
+  - numpy=1.21.2
+  - opencv=4.5.5
+  - pytorch::pytorch=1.13.1
+  - scikit-image=0.19.3
+  - pytorch::torchvision=0.14.1   # required by RoIAlign test.sh https://github.com/longcw/RoIAlign.pytorch
+  - tqdm=4.66.5
+prefix: $HOME/.conda/envs/planercnn_pytorch_1_13_cuda_11_7

@@ -20,8 +20,8 @@ import torch.utils.data
 from torch.autograd import Variable
 
 import utils
-from nms.nms_wrapper import nms
-from roialign.roi_align.crop_and_resize import CropAndResizeFunction
+from torchvision.ops import nms
+from roi_align import CropAndResize
 import cv2
 from models.modules import *
 from utils import *
@@ -338,7 +338,7 @@ def proposal_layer(inputs, proposal_count, nms_threshold, anchors, config=None):
     ## for small objects, so we're skipping it.
 
     ## Non-max suppression
-    keep = nms(torch.cat((boxes, scores.unsqueeze(1)), 1).data, nms_threshold)
+    keep = nms(boxes, scores, nms_threshold)
 
     keep = keep[:proposal_count]
     boxes = boxes[keep, :]
@@ -435,8 +435,8 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
         ind = Variable(torch.zeros(level_boxes.size()[0]),requires_grad=False).int()
         if level_boxes.is_cuda:
             ind = ind.cuda()
-        feature_maps[i] = feature_maps[i].unsqueeze(0)  #CropAndResizeFunction needs batch dimension
-        pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
+        feature_maps[i] = feature_maps[i].unsqueeze(0)  #CropAndResize needs batch dimension
+        pooled_features = CropAndResize(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
         pooled.append(pooled_features)
 
     ## Pack pooled features into one tensor
@@ -494,8 +494,8 @@ def coordinates_roi(inputs, pool_size, image_shape):
     ind = Variable(torch.zeros(boxes.size()[0]),requires_grad=False).int()
     if boxes.is_cuda:
         ind = ind.cuda()
-    cooridnates = cooridnates.unsqueeze(0)  ## CropAndResizeFunction needs batch dimension
-    pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(cooridnates, boxes, ind)
+    cooridnates = cooridnates.unsqueeze(0)  ## CropAndResize needs batch dimension
+    pooled_features = CropAndResize(pool_size, pool_size, 0)(cooridnates, boxes, ind)
 
     return pooled_features
 
@@ -635,12 +635,12 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
             box_ids = box_ids.cuda()
 
         if config.NUM_PARAMETER_CHANNELS > 0:
-            masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks[:, :, :, 0].contiguous().unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)
+            masks = Variable(CropAndResize(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks[:, :, :, 0].contiguous().unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)
             masks = torch.round(masks)
-            parameters = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks[:, :, :, 1].contiguous().unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)
+            parameters = Variable(CropAndResize(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks[:, :, :, 1].contiguous().unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)
             masks = torch.stack([masks, parameters], dim=-1)
         else:
-            masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)            
+            masks = Variable(CropAndResize(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False).squeeze(1)            
             masks = torch.round(masks)            
             pass
 
@@ -651,6 +651,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, gt_param
 
     ## 2. Negative ROIs are those with < 0.5 with every GT box. Skip crowds.
     negative_roi_bool = roi_iou_max < 0.5
+    negative_roi_bool = negative_roi_bool.to(torch.uint8)
     negative_roi_bool = negative_roi_bool & no_crowd_bool
     ## Negative ROIs. Add enough to maintain positive:negative ratio.
     if (negative_roi_bool > 0).sum() > 0 and positive_count>0:
@@ -836,7 +837,7 @@ def refine_detections(rois, probs, deltas, parameters, window, config, return_in
         ix_scores, order = ix_scores.sort(descending=True)
         ix_rois = ix_rois[order.data,:]
         
-        nms_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+        nms_keep = nms(ix_rois, ix_scores, config.DETECTION_NMS_THRESHOLD)
         nms_keep = keep[ixs[order[nms_keep].data].data]
         keep = intersect1d(keep, nms_keep)        
     elif use_nms == 1:
@@ -855,7 +856,7 @@ def refine_detections(rois, probs, deltas, parameters, window, config, return_in
             ix_scores, order = ix_scores.sort(descending=True)
             ix_rois = ix_rois[order.data,:]
 
-            class_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+            class_keep = nms(ix_rois, ix_scores, config.DETECTION_NMS_THRESHOLD)
 
             ## Map indicies
             class_keep = keep[ixs[order[class_keep].data].data]
@@ -1470,7 +1471,7 @@ class MaskRCNN(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform(m.weight)
+                nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     m.bias.data.zero_()
             elif isinstance(m, nn.BatchNorm2d):
@@ -1914,7 +1915,7 @@ class MaskRCNN(nn.Module):
                     box_ids = Variable(torch.arange(roi_gt_masks.size()[0]), requires_grad=False).int()
                     if self.config.GPU_COUNT:
                         box_ids = box_ids.cuda()
-                    roi_gt_masks = Variable(CropAndResizeFunction(self.config.FINAL_MASK_SHAPE[0], self.config.FINAL_MASK_SHAPE[1], 0)(roi_gt_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+                    roi_gt_masks = Variable(CropAndResize(self.config.FINAL_MASK_SHAPE[0], self.config.FINAL_MASK_SHAPE[1], 0)(roi_gt_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
                     roi_gt_masks = roi_gt_masks.squeeze(1)
 
                     roi_gt_masks = torch.round(roi_gt_masks)
